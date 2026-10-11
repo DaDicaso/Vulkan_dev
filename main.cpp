@@ -45,6 +45,7 @@ private:
     vk::raii::Device device = nullptr;
     uint32_t queueIndex = ~0;
     vk::raii::Queue queue = nullptr;
+    vk::raii::SwapchainKHR swapChain = nullptr;
 
     vk::raii::SurfaceKHR surface = nullptr;
     std::vector<vk::Image> swapChainImages;
@@ -56,6 +57,10 @@ private:
     vk::raii::Pipeline graphicsPipeline = nullptr;
     vk::raii::CommandPool commandPool = nullptr;
     vk::raii::CommandBuffer commandBuffer = nullptr;
+
+    vk::raii::Semaphore presentCompleteSemaphore = nullptr;
+    vk::raii::Semaphore renderFinishedSemaphore = nullptr;
+    vk::raii::Fence drawFence = nullptr;
 
     std::vector<const char *> requiredDeviceExtension ={
         vk::KHRSwapchainExtensionName
@@ -92,6 +97,7 @@ private:
         createGraphicsPipeline();
         createCommandPool();
         createCommandBuffer();
+        createSyncObjects();
     }
 
     void createImageViews() {
@@ -107,6 +113,12 @@ private:
             imageViewCreateInfo.image = image;
             swapChainImageViews.emplace_back(device, imageViewCreateInfo);
         }
+    }
+
+    void createSyncObjects() {
+        presentCompleteSemaphore = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
+        renderFinishedSemaphore = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
+        drawFence = vk::raii::Fence(device, {.flags = vk::FenceCreateFlagBits::eSignaled});
     }
 
     void setupDebugMessenger() {
@@ -429,6 +441,9 @@ private:
             .presentMode = chooseSwapPresentMode(availablePresentModes),
             .clipped =  true
         };
+ 
+        swapChain = vk::raii::SwapchainKHR(device, swapChainCreateInfo);
+        swapChainImages = swapChain.getImages();
     }
 
     static uint32_t chooseSwapMinImageCount(vk::SurfaceCapabilitiesKHR const &surfaceCapabilities) {
@@ -477,7 +492,47 @@ private:
     void mainLoop() {
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
+            drawFrame();
         }
+        device.waitIdle();
+    }
+
+    void drawFrame() {
+        auto fenceResult = device.waitForFences(*drawFence, vk::True, UINT64_MAX);
+        if (fenceResult != vk::Result::eSuccess) {
+            throw std::runtime_error("failed to wait for fence!");
+        }
+        device.resetFences(*drawFence);
+
+        auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore, nullptr);
+
+        recordCommandBuffer(imageIndex);
+
+        queue.waitIdle();
+
+        vk::PipelineStageFlags waitDestinationStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput);
+        const vk::SubmitInfo submitInfo{
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &*presentCompleteSemaphore,
+            .pWaitDstStageMask = &waitDestinationStageMask,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &*commandBuffer,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &*renderFinishedSemaphore
+        };
+
+        queue.submit(submitInfo, *drawFence);
+
+        const vk::PresentInfoKHR presentInfoKHR{
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &*renderFinishedSemaphore,
+            .swapchainCount = 1,
+            .pSwapchains = &*swapChain,
+            .pImageIndices = &imageIndex
+        };
+
+        result = queue.presentKHR(presentInfoKHR);
+
     }
 
     void cleanup() {
